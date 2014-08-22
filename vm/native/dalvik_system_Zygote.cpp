@@ -487,9 +487,10 @@ static int setSELinuxContext(uid_t uid, bool isSystemServer,
 /*
  * Utility routine to fork zygote and specialize the child process.
  */
-static pid_t forkAndSpecializeCommon(const u4* args, bool isSystemServer)
+static pid_t forkAndSpecializeCommon(const u4* args, bool isSystemServer,
+                                     bool doFork)
 {
-    pid_t pid;
+    pid_t pid = -1;
 
     uid_t uid = (uid_t) args[0];
     gid_t gid = (gid_t) args[1];
@@ -536,24 +537,26 @@ static pid_t forkAndSpecializeCommon(const u4* args, bool isSystemServer)
 #endif
     }
 
-    if (!gDvm.zygote) {
-        dvmThrowIllegalStateException(
-            "VM instance not started with -Xzygote");
+    if (doFork) {
+        if (!gDvm.zygote) {
+            dvmThrowIllegalStateException(
+                "VM instance not started with -Xzygote");
 
-        return -1;
+            return -1;
+        }
+
+        if (!dvmGcPreZygoteFork()) {
+            ALOGE("pre-fork heap failed");
+            dvmAbort();
+        }
+
+        setSignalHandler();
+
+        dvmDumpLoaderStats("zygote");
+        pid = fork();
     }
 
-    if (!dvmGcPreZygoteFork()) {
-        ALOGE("pre-fork heap failed");
-        dvmAbort();
-    }
-
-    setSignalHandler();
-
-    dvmDumpLoaderStats("zygote");
-    pid = fork();
-
-    if (pid == 0) {
+    if (pid == 0 || !doFork) {
         int err;
         /* The child process */
 
@@ -615,7 +618,7 @@ static pid_t forkAndSpecializeCommon(const u4* args, bool isSystemServer)
         }
 
         int current = personality(0xffffFFFF);
-        int success = personality((ADDR_NO_RANDOMIZE | current));
+        int success = personality(current);
         if (success == -1) {
           ALOGW("Personality switch failed. current=%d error=%d\n", current, errno);
         }
@@ -655,11 +658,15 @@ static pid_t forkAndSpecializeCommon(const u4* args, bool isSystemServer)
         /* configure additional debug options */
         enableDebugFeatures(debugFlags);
 
-        unsetSignalHandler();
-        gDvm.zygote = false;
-        if (!dvmInitAfterZygote()) {
-            ALOGE("error in post-zygote initialization");
-            dvmAbort();
+        if (doFork) {
+            unsetSignalHandler();
+            gDvm.zygote = false;
+            if (!dvmInitAfterZygote()) {
+                ALOGE("error in post-zygote initialization");
+                dvmAbort();
+            }
+        } else {
+            return 0;
         }
     } else if (pid > 0) {
         /* the parent process */
@@ -682,7 +689,17 @@ static void Dalvik_dalvik_system_Zygote_forkAndSpecialize(const u4* args,
 {
     pid_t pid;
 
-    pid = forkAndSpecializeCommon(args, false);
+    pid = forkAndSpecializeCommon(args, false, true);
+
+    RETURN_INT(pid);
+}
+
+static void Dalvik_dalvik_system_Zygote_noForkButSpecialize(const u4* args,
+    JValue* pResult)
+{
+    pid_t pid;
+
+    pid = forkAndSpecializeCommon(args, false, false);
 
     RETURN_INT(pid);
 }
@@ -696,7 +713,7 @@ static void Dalvik_dalvik_system_Zygote_forkSystemServer(
         const u4* args, JValue* pResult)
 {
     pid_t pid;
-    pid = forkAndSpecializeCommon(args, true);
+    pid = forkAndSpecializeCommon(args, true, true);
 
     /* The zygote process checks whether the child process has died or not. */
     if (pid > 0) {
@@ -737,6 +754,8 @@ const DalvikNativeMethod dvm_dalvik_system_Zygote[] = {
       Dalvik_dalvik_system_Zygote_fork },
     { "nativeForkAndSpecialize", "(II[II[[IILjava/lang/String;Ljava/lang/String;)I",
       Dalvik_dalvik_system_Zygote_forkAndSpecialize },
+    { "nativeNoForkButSpecialize", "(II[II[[IILjava/lang/String;Ljava/lang/String;)I",
+      Dalvik_dalvik_system_Zygote_noForkButSpecialize },
     { "nativeForkSystemServer", "(II[II[[IJJ)I",
       Dalvik_dalvik_system_Zygote_forkSystemServer },
     { "nativeExecShell", "(Ljava/lang/String;)V",

@@ -16,6 +16,7 @@
 /*
  * Command-line invocation of the Dalvik VM.
  */
+
 #include "jni.h"
 
 #include <stdlib.h>
